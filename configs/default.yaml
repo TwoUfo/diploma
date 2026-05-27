@@ -1,0 +1,50 @@
+data:
+  raw_path: "data/raw/dataset.csv"
+  processed_dir: "data/processed"
+  test_size: 0.15
+  val_size: 0.15
+  random_state: 42
+
+  drop_columns:
+    - id
+    - spkid
+    - full_name
+    - pdes
+    - name
+    - prefix
+    - orbit_id
+    - equinox
+    - epoch
+    - epoch_cal
+    - tp_cal
+    - q
+    - ad
+    - "n"
+    - per
+    - per_y
+    - moid_ld
+    - diameter_sigma
+    - albedo
+
+  rare_classes:
+    - HYA
+    - IEO
+    - AST
+    - CEN
+
+model:
+  backbone_layers: [512, 256, 128, 64]
+  head_hidden: 32
+  dropout_shared: [0.3, 0.3, 0.2, 0.2]
+  dropout_head: 0.1
+  n_classes: 10
+
+training:
+  batch_size: 1024
+  epochs: 100
+  lr: 0.001
+  weight_decay: 0.0001
+  patience: 10
+  max_grad_norm: 1.0
+  scheduler: cosine
+  min_lr: 0.00001
