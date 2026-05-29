@@ -64,6 +64,7 @@ class AsteroidMTLModel(nn.Module):
         self.class_head = TaskHead(shared_dim, head_hidden, n_classes, head_dropout)
         self.h_head = TaskHead(shared_dim, head_hidden, 1, head_dropout)
         self.diameter_head = TaskHead(shared_dim, head_hidden, 1, head_dropout)
+        self.albedo_head = TaskHead(shared_dim, head_hidden, 1, head_dropout)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         shared = self.backbone(x)
@@ -71,5 +72,6 @@ class AsteroidMTLModel(nn.Module):
             "class_logits": self.class_head(shared),
             "h_pred": self.h_head(shared).squeeze(-1),
             "diameter_pred": self.diameter_head(shared).squeeze(-1),
+            "albedo_pred": self.albedo_head(shared).squeeze(-1),
             "shared_repr": shared,
         }

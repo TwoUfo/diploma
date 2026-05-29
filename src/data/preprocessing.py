@@ -18,19 +18,40 @@ DROP_COLUMNS = [
 TARGET_CLASS = "class"
 TARGET_H = "H"
 TARGET_DIAMETER = "diameter"
+TARGET_ALBEDO = "albedo"
 
 JUPITER_A = 5.2044
+MARS_A = 1.523679
+SATURN_A = 9.5826
+NEPTUNE_A = 30.0699
+
+# (P_asteroid / P_planet, planet a, output column).
+# At exact resonance: a_res = a_planet * (P_ratio)^(2/3) by Kepler's third law.
+RESONANCES = [
+    (1.0,   MARS_A,    "res_mars_co"),   # Mars co-orbitals (e.g. 5261 Eureka)
+    (1/3,   JUPITER_A, "res_jup_3_1"),   # Kirkwood gap ~2.50 AU
+    (2/5,   JUPITER_A, "res_jup_5_2"),   # Kirkwood gap ~2.82 AU
+    (1/2,   JUPITER_A, "res_jup_2_1"),   # Kirkwood gap ~3.28 AU
+    (2/3,   JUPITER_A, "res_jup_3_2"),   # Hildas ~3.97 AU
+    (3/2,   NEPTUNE_A, "res_nep_2_3"),   # Plutinos ~39.4 AU
+    (2.0,   NEPTUNE_A, "res_nep_1_2"),   # Twotinos ~47.7 AU
+]
 
 
 def load_raw_data(path: str) -> pd.DataFrame:
     return pd.read_csv(path, low_memory=False)
 
 
-def compute_tisserand(df: pd.DataFrame) -> pd.Series:
+def compute_tisserand(df: pd.DataFrame, a_planet: float = JUPITER_A) -> pd.Series:
     a = df["a"]
     e = df["e"]
     i_rad = np.radians(df["i"])
-    return JUPITER_A / a + 2 * np.cos(i_rad) * np.sqrt(a / JUPITER_A * (1 - e**2))
+    return a_planet / a + 2 * np.cos(i_rad) * np.sqrt(a / a_planet * (1 - e**2))
+
+
+def compute_resonance_distance(a: pd.Series, period_ratio: float, a_planet: float) -> pd.Series:
+    a_res = a_planet * period_ratio ** (2 / 3)
+    return (a - a_res) / a_res
 
 
 def drop_corrupt_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -46,7 +67,7 @@ def drop_corrupt_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[keep].reset_index(drop=True)
 
 
-def preprocess(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series]:
+def preprocess(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series]:
     df = drop_corrupt_rows(df)
 
     df["neo"] = df["neo"].fillna("N").map({"Y": 1, "N": 0}).astype(float)
@@ -59,16 +80,26 @@ def preprocess(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd
     for col in sigma_cols:
         df[col] = df[col].fillna(df[col].median())
 
-    df["tisserand_j"] = compute_tisserand(df)
+    df["tisserand_j"]       = compute_tisserand(df, JUPITER_A)
+    df["tisserand_mars"]    = compute_tisserand(df, MARS_A)
+    df["tisserand_saturn"]  = compute_tisserand(df, SATURN_A)
+    df["tisserand_neptune"] = compute_tisserand(df, NEPTUNE_A)
+    for ratio, a_planet, name in RESONANCES:
+        df[name] = compute_resonance_distance(df["a"], ratio, a_planet)
 
     target_class = df[TARGET_CLASS].copy()
     target_class = target_class.replace({cls: "Rare" for cls in RARE_CLASSES})
 
     target_h = df[TARGET_H].copy()
-    target_diameter = df[TARGET_DIAMETER].copy()
-    target_diameter = np.log1p(target_diameter)
+    target_diameter = np.log1p(df[TARGET_DIAMETER].copy())
+    # Albedo physically in (0, 1]; train head in log-space (range ~ [-7, 0]).
+    # Clip tiny invalid values to avoid log(0) → -inf for the (very few) zero rows.
+    target_albedo = np.log(df[TARGET_ALBEDO].copy().clip(lower=1e-4))
 
-    df = df.drop(columns=DROP_COLUMNS + [TARGET_CLASS, TARGET_H, TARGET_DIAMETER], errors="ignore")
+    df = df.drop(
+        columns=DROP_COLUMNS + [TARGET_CLASS, TARGET_H, TARGET_DIAMETER],
+        errors="ignore",
+    )
 
     sigma_cols_present = [c for c in df.columns if c.startswith("sigma_")]
     for col in sigma_cols_present:
@@ -79,7 +110,7 @@ def preprocess(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd
         if df[col].isna().any():
             df[col] = df[col].fillna(df[col].median())
 
-    return df, target_class, target_h, target_diameter
+    return df, target_class, target_h, target_diameter, target_albedo
 
 
 def build_splits(
@@ -93,15 +124,17 @@ def build_splits(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     df = load_raw_data(raw_path)
-    features, target_class, target_h, target_diameter = preprocess(df)
+    features, target_class, target_h, target_diameter, target_albedo = preprocess(df)
 
     label_encoder = LabelEncoder()
     class_encoded = label_encoder.fit_transform(target_class)
 
     h_mask = (~target_h.isna()).astype(float).values
     diam_mask = (~target_diameter.isna()).astype(float).values
+    albedo_mask = (~target_albedo.isna()).astype(float).values
     target_h_filled = target_h.fillna(0).values
     target_diameter_filled = target_diameter.fillna(0).values
+    target_albedo_filled = target_albedo.fillna(0).values
 
     numeric_features = features.select_dtypes(include=[np.number])
 
@@ -141,8 +174,10 @@ def build_splits(
         out["class_label"] = class_encoded[idx]
         out["h_target"] = target_h_filled[idx]
         out["diameter_target"] = target_diameter_filled[idx]
+        out["albedo_target"] = target_albedo_filled[idx]
         out["h_mask"] = h_mask[idx]
         out["diameter_mask"] = diam_mask[idx]
+        out["albedo_mask"] = albedo_mask[idx]
         return out
 
     train_df = make_df(X_train_scaled, idx_train, "train")
@@ -162,6 +197,9 @@ def build_splits(
     print(f"Diameter coverage - train: {train_df['diameter_mask'].mean():.1%}, "
           f"val: {val_df['diameter_mask'].mean():.1%}, "
           f"test: {test_df['diameter_mask'].mean():.1%}")
+    print(f"Albedo coverage   - train: {train_df['albedo_mask'].mean():.1%}, "
+          f"val: {val_df['albedo_mask'].mean():.1%}, "
+          f"test: {test_df['albedo_mask'].mean():.1%}")
 
     return train_df, val_df, test_df, scaler, label_encoder
 

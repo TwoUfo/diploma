@@ -34,10 +34,11 @@ class Trainer:
         self.model.train() if train else self.model.eval()
 
         total_loss = 0.0
-        loss_components = {"loss_class": 0.0, "loss_h": 0.0, "loss_diam": 0.0}
+        loss_components = {"loss_class": 0.0, "loss_h": 0.0, "loss_diam": 0.0, "loss_albedo": 0.0}
         all_class_true, all_class_pred = [], []
         all_h_true, all_h_pred, all_h_mask = [], [], []
         all_diam_true, all_diam_pred, all_diam_mask = [], [], []
+        all_alb_true, all_alb_pred, all_alb_mask = [], [], []
 
         ctx = torch.no_grad() if not train else torch.enable_grad()
         with ctx:
@@ -46,14 +47,17 @@ class Trainer:
                 class_labels = batch["class_label"].to(self.device)
                 h_targets = batch["h_target"].to(self.device)
                 diam_targets = batch["diameter_target"].to(self.device)
+                alb_targets = batch["albedo_target"].to(self.device)
                 h_mask = batch["h_mask"].to(self.device)
                 diam_mask = batch["diameter_mask"].to(self.device)
+                alb_mask = batch["albedo_mask"].to(self.device)
 
                 outputs = self.model(features)
                 loss, metrics = self.criterion(
-                    outputs["class_logits"], outputs["h_pred"], outputs["diameter_pred"],
-                    class_labels, h_targets, diam_targets,
-                    h_mask, diam_mask,
+                    outputs["class_logits"], outputs["h_pred"],
+                    outputs["diameter_pred"], outputs["albedo_pred"],
+                    class_labels, h_targets, diam_targets, alb_targets,
+                    h_mask, diam_mask, alb_mask,
                 )
 
                 if train:
@@ -78,6 +82,9 @@ class Trainer:
                 all_diam_true.append(diam_targets.cpu().numpy())
                 all_diam_pred.append(outputs["diameter_pred"].detach().cpu().numpy())
                 all_diam_mask.append(diam_mask.cpu().numpy())
+                all_alb_true.append(alb_targets.cpu().numpy())
+                all_alb_pred.append(outputs["albedo_pred"].detach().cpu().numpy())
+                all_alb_mask.append(alb_mask.cpu().numpy())
 
         n = len(loader.dataset)
         result = {"loss": total_loss / n}
@@ -100,6 +107,12 @@ class Trainer:
         d_m_arr = np.concatenate(all_diam_mask)
         d_m = regression_metrics(y_d_true, y_d_pred, d_m_arr)
         result.update({f"diam_{k}": v for k, v in d_m.items()})
+
+        y_a_true = np.concatenate(all_alb_true)
+        y_a_pred = np.concatenate(all_alb_pred)
+        a_m_arr = np.concatenate(all_alb_mask)
+        a_m = regression_metrics(y_a_true, y_a_pred, a_m_arr)
+        result.update({f"albedo_{k}": v for k, v in a_m.items()})
 
         return result
 
@@ -137,7 +150,8 @@ class Trainer:
                 f"Val Loss: {val_metrics['loss']:.4f} | "
                 f"Val Acc: {val_metrics['class_accuracy']:.4f} | "
                 f"Val H R²: {val_metrics['h_r2']:.4f} | "
-                f"Val Diam R²: {val_metrics['diam_r2']:.4f}"
+                f"Val Diam R²: {val_metrics['diam_r2']:.4f} | "
+                f"Val Alb R²: {val_metrics['albedo_r2']:.4f}"
             )
 
             if val_metrics["loss"] < best_val_loss:
