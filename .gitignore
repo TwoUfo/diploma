@@ -36,3 +36,7 @@ Thumbs.db
 
 # Environment
 .env
+
+# Local thesis-writing notes (not part of the repository)
+figures/
+thesis_notes/

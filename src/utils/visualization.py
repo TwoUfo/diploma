@@ -34,35 +34,29 @@ def plot_missing_heatmap(df: pd.DataFrame, title: str = "Missing Data Pattern"):
 
 
 def plot_training_history(history: list[dict]):
+    """Plot per-epoch metrics for all four MTL tasks plus total loss.
+
+    Layout: 2 × 3 grid — total loss, class accuracy, then R² for diameter,
+    albedo, rotation period, and one spare panel for class F1.
+    """
     epochs = [h["epoch"] for h in history]
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    def _plot(ax, key, title):
+        ax.plot(epochs, [h[f"train_{key}"] for h in history], label="Train")
+        ax.plot(epochs, [h[f"val_{key}"] for h in history], label="Val")
+        ax.set_title(title)
+        ax.set_xlabel("Epoch")
+        ax.legend()
 
-    axes[0, 0].plot(epochs, [h["train_loss"] for h in history], label="Train")
-    axes[0, 0].plot(epochs, [h["val_loss"] for h in history], label="Val")
-    axes[0, 0].set_title("Total Loss")
-    axes[0, 0].legend()
-    axes[0, 0].set_xlabel("Epoch")
+    _plot(axes[0, 0], "loss",            "Total Loss")
+    _plot(axes[0, 1], "class_accuracy",  "Classification Accuracy")
+    _plot(axes[0, 2], "class_f1_macro",  "Class F1 (macro)")
+    _plot(axes[1, 0], "diam_r2",         "Diameter R²")
+    _plot(axes[1, 1], "albedo_r2",       "Albedo R²")
+    _plot(axes[1, 2], "rot_r2",          "Rotation Period R²")
 
-    axes[0, 1].plot(epochs, [h["train_class_accuracy"] for h in history], label="Train")
-    axes[0, 1].plot(epochs, [h["val_class_accuracy"] for h in history], label="Val")
-    axes[0, 1].set_title("Classification Accuracy")
-    axes[0, 1].legend()
-    axes[0, 1].set_xlabel("Epoch")
-
-    axes[1, 0].plot(epochs, [h["train_h_r2"] for h in history], label="Train")
-    axes[1, 0].plot(epochs, [h["val_h_r2"] for h in history], label="Val")
-    axes[1, 0].set_title("H Magnitude R²")
-    axes[1, 0].legend()
-    axes[1, 0].set_xlabel("Epoch")
-
-    axes[1, 1].plot(epochs, [h["train_diam_r2"] for h in history], label="Train")
-    axes[1, 1].plot(epochs, [h["val_diam_r2"] for h in history], label="Val")
-    axes[1, 1].set_title("Diameter R²")
-    axes[1, 1].legend()
-    axes[1, 1].set_xlabel("Epoch")
-
-    plt.suptitle("Training History", fontsize=14)
+    plt.suptitle("Training History — 4-task MTL", fontsize=14)
     plt.tight_layout()
     return fig
 

@@ -13,12 +13,30 @@ DROP_COLUMNS = [
     "orbit_id", "equinox", "epoch", "epoch_cal", "tp_cal",
     "q", "ad", "n", "per", "per_y", "moid_ld",
     "diameter_sigma", "albedo",
+    # New JPL columns we explicitly drop because coverage is too low
+    # to be useful (<0.1% of rows). The model would just learn the
+    # median value, which is noise.
+    "G", "BV", "UB", "IR",
+    # Spectral types: high signal but only 0.1% coverage — would need
+    # one-hot encoding with a large "Unknown" bucket. Skip for now to
+    # focus on the n_obs_used/data_arc/condition_code gold trio.
+    "spec_B", "spec_T",
+    # Geometric/timing fields with near-zero signal (max_signal < 0.07
+    # against all three targets). They describe where the asteroid is
+    # in its orbit at the snapshot epoch — not what it *is*.
+    "om", "w", "tp", "epoch_mjd",
+    # H_sigma was useful when H was a target (heteroscedastic loss);
+    # now that H is an input feature, H_sigma adds noise.
+    "H_sigma",
+    # NOTE: rot_per stays in raw — it is now the 4th regression target,
+    # extracted by preprocess() before this drop.
 ]
 
 TARGET_CLASS = "class"
 TARGET_H = "H"
 TARGET_DIAMETER = "diameter"
 TARGET_ALBEDO = "albedo"
+TARGET_ROT_PER = "rot_per"
 
 JUPITER_A = 5.2044
 MARS_A = 1.523679
@@ -69,35 +87,58 @@ def drop_corrupt_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 def preprocess(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series]:
     df = drop_corrupt_rows(df)
+    # H is now a model INPUT, not a target. Drop the ~0.7% of rows where H is
+    # missing — we need it to predict diameter/albedo, and there is no
+    # principled way to fill it (the whole point is that H is cheap to measure).
+    h_present = df[TARGET_H].notna()
+    dropped_h = (~h_present).sum()
+    if dropped_h > 0:
+        print(f"Dropped {dropped_h} rows without measured H (now a required feature)")
+    df = df.loc[h_present].reset_index(drop=True)
 
     df["neo"] = df["neo"].fillna("N").map({"Y": 1, "N": 0}).astype(float)
     df["pha"] = df["pha"].fillna("N").map({"Y": 1, "N": 0}).astype(float)
 
-    df["moid_missing"] = df["moid"].isna().astype(float)
+    # moid has 100 % coverage in the refreshed JPL catalogue — no missing
+    # indicator needed.
     df["moid"] = df["moid"].fillna(df["moid"].max())
 
     sigma_cols = [c for c in df.columns if c.startswith("sigma_")]
     for col in sigma_cols:
         df[col] = df[col].fillna(df[col].median())
 
-    df["tisserand_j"]       = compute_tisserand(df, JUPITER_A)
-    df["tisserand_mars"]    = compute_tisserand(df, MARS_A)
-    df["tisserand_saturn"]  = compute_tisserand(df, SATURN_A)
-    df["tisserand_neptune"] = compute_tisserand(df, NEPTUNE_A)
-    for ratio, a_planet, name in RESONANCES:
-        df[name] = compute_resonance_distance(df["a"], ratio, a_planet)
+    # Observation-quality features pulled fresh from JPL (see fetch_jpl_full.py).
+    # n_obs_used carries the strongest single signal for H (Spearman ρ=-0.803).
+    # data_arc and condition_code are secondary but still informative.
+    if "n_obs_used" in df.columns:
+        df["n_obs_used"] = np.log1p(df["n_obs_used"].fillna(0))
+    if "data_arc" in df.columns:
+        df["data_arc"] = np.log1p(df["data_arc"].fillna(df["data_arc"].median()))
+    if "condition_code" in df.columns:
+        df["condition_code"] = pd.to_numeric(df["condition_code"], errors="coerce")
+        df["condition_code"] = df["condition_code"].fillna(df["condition_code"].median())
+
+    # Only tisserand_j survives the feature-importance audit: it discriminates
+    # asteroids from Jupiter-family comets, with a non-trivial value across the
+    # whole catalogue. The other Tisserand parameters and all resonance-distance
+    # features were affine functions of `a` and offered zero new signal beyond
+    # what a deep MLP can derive from `a` itself.
+    df["tisserand_j"] = compute_tisserand(df, JUPITER_A)
 
     target_class = df[TARGET_CLASS].copy()
     target_class = target_class.replace({cls: "Rare" for cls in RARE_CLASSES})
 
-    target_h = df[TARGET_H].copy()
     target_diameter = np.log1p(df[TARGET_DIAMETER].copy())
     # Albedo physically in (0, 1]; train head in log-space (range ~ [-7, 0]).
     # Clip tiny invalid values to avoid log(0) → -inf for the (very few) zero rows.
     target_albedo = np.log(df[TARGET_ALBEDO].copy().clip(lower=1e-4))
+    # Rotation period in hours: ~2 % coverage, log-normal distribution
+    # spanning [0.001, 4800] h. Regress in natural log space (range ~ [-7, 8]).
+    target_rot_per = np.log(df[TARGET_ROT_PER].copy().clip(lower=0.01))
 
+    # NOTE: H stays in df — it is now a model input feature, not a target.
     df = df.drop(
-        columns=DROP_COLUMNS + [TARGET_CLASS, TARGET_H, TARGET_DIAMETER],
+        columns=DROP_COLUMNS + [TARGET_CLASS, TARGET_DIAMETER, TARGET_ROT_PER],
         errors="ignore",
     )
 
@@ -110,7 +151,7 @@ def preprocess(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd
         if df[col].isna().any():
             df[col] = df[col].fillna(df[col].median())
 
-    return df, target_class, target_h, target_diameter, target_albedo
+    return df, target_class, target_diameter, target_albedo, target_rot_per
 
 
 def build_splits(
@@ -124,17 +165,17 @@ def build_splits(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     df = load_raw_data(raw_path)
-    features, target_class, target_h, target_diameter, target_albedo = preprocess(df)
+    features, target_class, target_diameter, target_albedo, target_rot_per = preprocess(df)
 
     label_encoder = LabelEncoder()
     class_encoded = label_encoder.fit_transform(target_class)
 
-    h_mask = (~target_h.isna()).astype(float).values
     diam_mask = (~target_diameter.isna()).astype(float).values
     albedo_mask = (~target_albedo.isna()).astype(float).values
-    target_h_filled = target_h.fillna(0).values
+    rot_mask = (~target_rot_per.isna()).astype(float).values
     target_diameter_filled = target_diameter.fillna(0).values
     target_albedo_filled = target_albedo.fillna(0).values
+    target_rot_per_filled = target_rot_per.fillna(0).values
 
     numeric_features = features.select_dtypes(include=[np.number])
 
@@ -172,12 +213,12 @@ def build_splits(
     def make_df(X_scaled, idx, split_name):
         out = pd.DataFrame(X_scaled, columns=feature_names)
         out["class_label"] = class_encoded[idx]
-        out["h_target"] = target_h_filled[idx]
         out["diameter_target"] = target_diameter_filled[idx]
         out["albedo_target"] = target_albedo_filled[idx]
-        out["h_mask"] = h_mask[idx]
+        out["rot_target"] = target_rot_per_filled[idx]
         out["diameter_mask"] = diam_mask[idx]
         out["albedo_mask"] = albedo_mask[idx]
+        out["rot_mask"] = rot_mask[idx]
         return out
 
     train_df = make_df(X_train_scaled, idx_train, "train")
@@ -191,6 +232,23 @@ def build_splits(
     joblib.dump(scaler, output_dir / "scaler.joblib")
     joblib.dump(label_encoder, output_dir / "label_encoder.joblib")
 
+    # Class-conditional albedo prior (mean log albedo per class on TRAIN only).
+    # The residual albedo head adds this as a bias term so the model learns
+    # |class_mean - true_albedo| instead of the full target. Drastically
+    # reduces the dynamic range the head has to fit.
+    class_mean_log_albedo = np.zeros(len(label_encoder.classes_), dtype=np.float32)
+    for k in range(len(label_encoder.classes_)):
+        mask_k = (train_df["class_label"] == k) & (train_df["albedo_mask"] == 1)
+        vals = train_df.loc[mask_k, "albedo_target"].values
+        if len(vals) > 0:
+            class_mean_log_albedo[k] = float(np.mean(vals))
+        else:
+            class_mean_log_albedo[k] = float(np.log(0.1))  # fallback ≈ typical
+    joblib.dump(class_mean_log_albedo, output_dir / "class_albedo_prior.joblib")
+    print("Class-mean log(albedo) (residual baseline):")
+    for k, name in enumerate(label_encoder.classes_):
+        print(f"  {name}: {class_mean_log_albedo[k]:+.3f}  (albedo ≈ {np.exp(class_mean_log_albedo[k]):.3f})")
+
     print(f"Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
     print(f"Features: {len(feature_names)}")
     print(f"Classes: {label_encoder.classes_.tolist()}")
@@ -200,6 +258,9 @@ def build_splits(
     print(f"Albedo coverage   - train: {train_df['albedo_mask'].mean():.1%}, "
           f"val: {val_df['albedo_mask'].mean():.1%}, "
           f"test: {test_df['albedo_mask'].mean():.1%}")
+    print(f"RotPer coverage   - train: {train_df['rot_mask'].mean():.1%}, "
+          f"val: {val_df['rot_mask'].mean():.1%}, "
+          f"test: {test_df['rot_mask'].mean():.1%}")
 
     return train_df, val_df, test_df, scaler, label_encoder
 

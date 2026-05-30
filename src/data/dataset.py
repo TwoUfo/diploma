@@ -8,19 +8,19 @@ class AsteroidDataset(Dataset):
         df = pd.read_parquet(parquet_path)
 
         target_cols = [
-            "class_label", "h_target", "diameter_target", "albedo_target",
-            "h_mask", "diameter_mask", "albedo_mask",
+            "class_label", "diameter_target", "albedo_target", "rot_target",
+            "diameter_mask", "albedo_mask", "rot_mask",
         ]
         feature_cols = [c for c in df.columns if c not in target_cols]
 
         self.features = torch.tensor(df[feature_cols].values, dtype=torch.float32)
         self.class_labels = torch.tensor(df["class_label"].values, dtype=torch.long)
-        self.h_targets = torch.tensor(df["h_target"].values, dtype=torch.float32)
         self.diameter_targets = torch.tensor(df["diameter_target"].values, dtype=torch.float32)
         self.albedo_targets = torch.tensor(df["albedo_target"].values, dtype=torch.float32)
-        self.h_mask = torch.tensor(df["h_mask"].values, dtype=torch.float32)
+        self.rot_targets = torch.tensor(df["rot_target"].values, dtype=torch.float32)
         self.diameter_mask = torch.tensor(df["diameter_mask"].values, dtype=torch.float32)
         self.albedo_mask = torch.tensor(df["albedo_mask"].values, dtype=torch.float32)
+        self.rot_mask = torch.tensor(df["rot_mask"].values, dtype=torch.float32)
 
     @property
     def n_features(self) -> int:
@@ -33,10 +33,10 @@ class AsteroidDataset(Dataset):
         return {
             "features": self.features[idx],
             "class_label": self.class_labels[idx],
-            "h_target": self.h_targets[idx],
             "diameter_target": self.diameter_targets[idx],
             "albedo_target": self.albedo_targets[idx],
-            "h_mask": self.h_mask[idx],
+            "rot_target": self.rot_targets[idx],
             "diameter_mask": self.diameter_mask[idx],
             "albedo_mask": self.albedo_mask[idx],
+            "rot_mask": self.rot_mask[idx],
         }

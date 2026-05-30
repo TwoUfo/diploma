@@ -34,30 +34,31 @@ class Trainer:
         self.model.train() if train else self.model.eval()
 
         total_loss = 0.0
-        loss_components = {"loss_class": 0.0, "loss_h": 0.0, "loss_diam": 0.0, "loss_albedo": 0.0}
+        loss_components = {"loss_class": 0.0, "loss_diam": 0.0, "loss_albedo": 0.0, "loss_rot": 0.0}
         all_class_true, all_class_pred = [], []
-        all_h_true, all_h_pred, all_h_mask = [], [], []
         all_diam_true, all_diam_pred, all_diam_mask = [], [], []
         all_alb_true, all_alb_pred, all_alb_mask = [], [], []
+        all_rot_true, all_rot_pred, all_rot_mask = [], [], []
 
         ctx = torch.no_grad() if not train else torch.enable_grad()
         with ctx:
             for batch in loader:
                 features = batch["features"].to(self.device)
                 class_labels = batch["class_label"].to(self.device)
-                h_targets = batch["h_target"].to(self.device)
                 diam_targets = batch["diameter_target"].to(self.device)
                 alb_targets = batch["albedo_target"].to(self.device)
-                h_mask = batch["h_mask"].to(self.device)
+                rot_targets = batch["rot_target"].to(self.device)
                 diam_mask = batch["diameter_mask"].to(self.device)
                 alb_mask = batch["albedo_mask"].to(self.device)
+                rot_mask = batch["rot_mask"].to(self.device)
 
-                outputs = self.model(features)
+                outputs = self.model(features, class_label=class_labels if train else None)
                 loss, metrics = self.criterion(
-                    outputs["class_logits"], outputs["h_pred"],
+                    outputs["class_logits"],
                     outputs["diameter_pred"], outputs["albedo_pred"],
-                    class_labels, h_targets, diam_targets, alb_targets,
-                    h_mask, diam_mask, alb_mask,
+                    outputs["rot_log_pi"], outputs["rot_mu"], outputs["rot_log_sigma"],
+                    class_labels, diam_targets, alb_targets, rot_targets,
+                    diam_mask, alb_mask, rot_mask,
                 )
 
                 if train:
@@ -76,15 +77,15 @@ class Trainer:
                 preds = outputs["class_logits"].argmax(dim=1).cpu().numpy()
                 all_class_true.append(class_labels.cpu().numpy())
                 all_class_pred.append(preds)
-                all_h_true.append(h_targets.cpu().numpy())
-                all_h_pred.append(outputs["h_pred"].detach().cpu().numpy())
-                all_h_mask.append(h_mask.cpu().numpy())
                 all_diam_true.append(diam_targets.cpu().numpy())
                 all_diam_pred.append(outputs["diameter_pred"].detach().cpu().numpy())
                 all_diam_mask.append(diam_mask.cpu().numpy())
                 all_alb_true.append(alb_targets.cpu().numpy())
                 all_alb_pred.append(outputs["albedo_pred"].detach().cpu().numpy())
                 all_alb_mask.append(alb_mask.cpu().numpy())
+                all_rot_true.append(rot_targets.cpu().numpy())
+                all_rot_pred.append(outputs["rot_pred"].detach().cpu().numpy())
+                all_rot_mask.append(rot_mask.cpu().numpy())
 
         n = len(loader.dataset)
         result = {"loss": total_loss / n}
@@ -95,12 +96,6 @@ class Trainer:
         y_cls_pred = np.concatenate(all_class_pred)
         cls_m = classification_metrics(y_cls_true, y_cls_pred)
         result.update({f"class_{k}": v for k, v in cls_m.items()})
-
-        y_h_true = np.concatenate(all_h_true)
-        y_h_pred = np.concatenate(all_h_pred)
-        h_m_arr = np.concatenate(all_h_mask)
-        h_m = regression_metrics(y_h_true, y_h_pred, h_m_arr)
-        result.update({f"h_{k}": v for k, v in h_m.items()})
 
         y_d_true = np.concatenate(all_diam_true)
         y_d_pred = np.concatenate(all_diam_pred)
@@ -113,6 +108,12 @@ class Trainer:
         a_m_arr = np.concatenate(all_alb_mask)
         a_m = regression_metrics(y_a_true, y_a_pred, a_m_arr)
         result.update({f"albedo_{k}": v for k, v in a_m.items()})
+
+        y_r_true = np.concatenate(all_rot_true)
+        y_r_pred = np.concatenate(all_rot_pred)
+        r_m_arr = np.concatenate(all_rot_mask)
+        r_m = regression_metrics(y_r_true, y_r_pred, r_m_arr)
+        result.update({f"rot_{k}": v for k, v in r_m.items()})
 
         return result
 
@@ -149,9 +150,9 @@ class Trainer:
                 f"Train Loss: {train_metrics['loss']:.4f} | "
                 f"Val Loss: {val_metrics['loss']:.4f} | "
                 f"Val Acc: {val_metrics['class_accuracy']:.4f} | "
-                f"Val H R²: {val_metrics['h_r2']:.4f} | "
                 f"Val Diam R²: {val_metrics['diam_r2']:.4f} | "
-                f"Val Alb R²: {val_metrics['albedo_r2']:.4f}"
+                f"Val Alb R²: {val_metrics['albedo_r2']:.4f} | "
+                f"Val Rot R²: {val_metrics['rot_r2']:.4f}"
             )
 
             if val_metrics["loss"] < best_val_loss:

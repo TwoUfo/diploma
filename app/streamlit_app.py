@@ -10,16 +10,16 @@ import plotly.express as px
 from sklearn.neighbors import NearestNeighbors
 
 from src.models.mtl_model import AsteroidMTLModel
-from src.data.preprocessing import (
-    JUPITER_A, MARS_A, SATURN_A, NEPTUNE_A, RESONANCES,
-)
+from src.data.preprocessing import JUPITER_A
 
 
-USER_INPUT_FEATS = ["e", "a", "i", "om", "w", "ma"]
-DERIVED_FEATS = (
-    ["tisserand_j", "tisserand_mars", "tisserand_saturn", "tisserand_neptune"]
-    + [name for _, _, name in RESONANCES]
-)
+# The model now uses 24 features; the user directly controls 5 (e, a, i, ma,
+# H) and tisserand_j is derived from a, e, i. om / w were dropped during
+# feature-importance pruning because their max signal against all targets was
+# < 0.03 — they describe orbital orientation at the snapshot epoch and carry
+# no information about what the asteroid *is*.
+USER_INPUT_FEATS = ["e", "a", "i", "ma", "H"]
+DERIVED_FEATS = ["tisserand_j"]
 ORBITAL_FEATS = USER_INPUT_FEATS + DERIVED_FEATS
 KNN_K = 100
 CUSTOM_LABEL = "Custom (k-NN inferred)"
@@ -52,6 +52,7 @@ def load_model():
     n_features = scaler.n_features_in_
     feat_names = list(scaler.feature_names_in_)
 
+    class_albedo_prior = joblib.load("../data/processed/class_albedo_prior.joblib")
     model = AsteroidMTLModel(
         n_features=n_features,
         n_classes=n_classes,
@@ -59,6 +60,8 @@ def load_model():
         backbone_dropouts=[0.3, 0.3, 0.2, 0.2],
         head_hidden=32,
         head_dropout=0.1,
+        class_albedo_prior=class_albedo_prior,
+        rot_mdn_components=5,
     )
     checkpoint = torch.load("../models/best_mtl_model.pt", map_location="cpu", weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -73,13 +76,34 @@ def load_model():
 
     nn_index = NearestNeighbors(n_neighbors=KNN_K, algorithm="auto").fit(X_scaled[:, orbital_idx])
 
-    raw_cols = ["pdes", "name", "class", "e", "a", "i", "om", "w", "ma",
-                "H", "diameter", "albedo"]
-    raw = pd.read_csv("../data/raw/dataset.csv", low_memory=False, usecols=raw_cols)
+    # Display columns for the preset UI (orbital params + true physical values).
+    display_cols = ["pdes", "name", "class", "e", "a", "i", "om", "w", "ma",
+                    "H", "diameter", "albedo", "rot_per"]
+    raw = pd.read_csv("../data/raw/dataset.csv", low_memory=False, usecols=display_cols)
     raw["pdes"] = raw["pdes"].astype(str).str.strip()
     raw["taxonomy"] = raw["class"].replace(RARE_REMAP)
     preset_rows = raw[raw["pdes"].isin(PRESET_ASTEROID_PDES)].set_index("pdes")
     preset_rows = preset_rows.loc[[p for p in PRESET_ASTEROID_PDES if p in preset_rows.index]]
+
+    # Precompute REAL scaled feature vectors for each preset asteroid by
+    # running the actual preprocessing pipeline on the full catalogue.
+    # This costs ~15 s once at startup (cached) but gives the model the same
+    # 42-feature input it saw during training — including n_obs_used,
+    # data_arc, condition_code, H_sigma, etc. — instead of k-NN proxies.
+    from src.data.preprocessing import preprocess, drop_corrupt_rows
+    full_raw = pd.read_csv("../data/raw/dataset.csv", low_memory=False)
+    full_raw["pdes_str"] = full_raw["pdes"].astype(str).str.strip()
+    full_clean = drop_corrupt_rows(full_raw)
+    full_features, _, _, _, _ = preprocess(full_raw.copy())
+    preset_pdes_set = set(PRESET_ASTEROID_PDES)
+    preset_clean_idx = full_clean.index[full_clean["pdes_str"].isin(preset_pdes_set)].tolist()
+    # Map pdes → scaled feature vector
+    preset_features_aligned = full_features.loc[preset_clean_idx, feat_names]
+    preset_scaled_matrix = scaler.transform(preset_features_aligned.values).astype(np.float32)
+    preset_scaled = {
+        full_clean.loc[idx, "pdes_str"]: row
+        for idx, row in zip(preset_clean_idx, preset_scaled_matrix)
+    }
 
     return {
         "model": model,
@@ -87,6 +111,7 @@ def load_model():
         "label_encoder": label_encoder,
         "feat_names": feat_names,
         "X_scaled": X_scaled,
+        "preset_scaled": preset_scaled,
         "train_class_labels": train_class_labels,
         "nn_index": nn_index,
         "orbital_idx": orbital_idx,
@@ -101,17 +126,8 @@ def tisserand_scalar(a, e, i_deg, a_planet):
 
 
 def compute_derived(a, e, i_deg) -> dict:
-    """Reproduce src/data/preprocessing.py feature engineering for a single (a,e,i)."""
-    out = {
-        "tisserand_j":       tisserand_scalar(a, e, i_deg, JUPITER_A),
-        "tisserand_mars":    tisserand_scalar(a, e, i_deg, MARS_A),
-        "tisserand_saturn":  tisserand_scalar(a, e, i_deg, SATURN_A),
-        "tisserand_neptune": tisserand_scalar(a, e, i_deg, NEPTUNE_A),
-    }
-    for ratio, a_planet, name in RESONANCES:
-        a_res = a_planet * ratio ** (2 / 3)
-        out[name] = (a - a_res) / a_res
-    return out
+    """Reproduce src/data/preprocessing.py feature engineering for one (a,e,i)."""
+    return {"tisserand_j": tisserand_scalar(a, e, i_deg, JUPITER_A)}
 
 
 def predict_with_knn_fill(user_raw: dict, ctx) -> tuple[np.ndarray, np.ndarray]:
@@ -186,19 +202,35 @@ st.sidebar.selectbox(
     ),
 )
 
-e  = st.sidebar.number_input("Eccentricity (e)",              min_value=0.0, max_value=0.99,  key="e",  step=0.01, format="%.4f", on_change=mark_custom)
-a  = st.sidebar.number_input("Semi-major axis a [AU]",        min_value=0.1, max_value=200.0, key="a",  step=0.1,  format="%.4f", on_change=mark_custom)
-i  = st.sidebar.number_input("Inclination i [deg]",           min_value=0.0, max_value=180.0, key="i",  step=0.5,  format="%.2f", on_change=mark_custom)
-om = st.sidebar.number_input("Long. ascending node om [deg]", min_value=0.0, max_value=360.0, key="om", step=1.0,  format="%.2f", on_change=mark_custom)
-w  = st.sidebar.number_input("Arg. perihelion w [deg]",       min_value=0.0, max_value=360.0, key="w",  step=1.0,  format="%.2f", on_change=mark_custom)
-ma = st.sidebar.number_input("Mean anomaly ma [deg]",         min_value=0.0, max_value=360.0, key="ma", step=1.0,  format="%.2f", on_change=mark_custom)
+e  = st.sidebar.number_input("Eccentricity (e)",      min_value=0.0, max_value=0.99,  key="e",  step=0.01, format="%.4f", on_change=mark_custom)
+a  = st.sidebar.number_input("Semi-major axis a [AU]", min_value=0.1, max_value=200.0, key="a",  step=0.1,  format="%.4f", on_change=mark_custom)
+i  = st.sidebar.number_input("Inclination i [deg]",    min_value=0.0, max_value=180.0, key="i",  step=0.5,  format="%.2f", on_change=mark_custom)
+ma = st.sidebar.number_input("Mean anomaly ma [deg]",  min_value=0.0, max_value=360.0, key="ma", step=1.0,  format="%.2f", on_change=mark_custom)
+st.sidebar.markdown("---")
+H = st.sidebar.number_input(
+    "Absolute magnitude H [mag]",
+    min_value=-5.0, max_value=35.0, key="H", step=0.1, format="%.2f",
+    on_change=mark_custom,
+    help="Observed absolute magnitude — cheap to measure (any survey gives V; "
+         "H follows from V and orbit). The model uses H as a known input to "
+         "predict diameter and albedo.",
+)
 
 if st.sidebar.button("Predict", type="primary"):
     derived = compute_derived(a, e, i)
-    user_raw = {"e": e, "a": a, "i": i, "om": om, "w": w, "ma": ma, **derived}
+    user_raw = {"e": e, "a": a, "i": i, "ma": ma, "H": H, **derived}
 
-    scaled_row, neighbor_indices = predict_with_knn_fill(user_raw, ctx)
-    fill_mode = f"k-NN over {KNN_K} nearest training asteroids"
+    preset_pdes = PRESETS.get(st.session_state.preset)
+    if preset_pdes is not None and preset_pdes in ctx["preset_scaled"]:
+        # Real-features path: use the asteroid's actual 42-feature row from JPL.
+        # This includes n_obs_used, data_arc, condition_code etc. — exactly what
+        # the model saw during training. No k-NN approximation.
+        scaled_row = ctx["preset_scaled"][preset_pdes]
+        neighbor_indices = None
+        fill_mode = f"real 42 features (catalogued asteroid {preset_pdes})"
+    else:
+        scaled_row, neighbor_indices = predict_with_knn_fill(user_raw, ctx)
+        fill_mode = f"k-NN over {KNN_K} nearest training asteroids"
 
     x = torch.FloatTensor(scaled_row.reshape(1, -1))
     with torch.no_grad():
@@ -206,30 +238,47 @@ if st.sidebar.button("Predict", type="primary"):
 
     probs = torch.softmax(outputs["class_logits"], dim=1).squeeze().numpy()
     pred_class = label_encoder.classes_[probs.argmax()]
-    pred_h = outputs["h_pred"].item()
     pred_diam_learned = np.expm1(outputs["diameter_pred"].item())
     pred_albedo = float(np.clip(np.exp(outputs["albedo_pred"].item()), 1e-3, 1.0))
-    # Closed-form diameter from H and albedo via standard asteroid magnitude formula:
+    # Rotation: MDN gives K mixture components. Report the most-likely-mode mean,
+    # plus the second-place candidate so the user can see alternate hypotheses
+    # (e.g. fast YORP-spun vs slow primordial for borderline NEOs).
+    pred_rot_per = float(np.exp(outputs["rot_pred"].item()))
+    log_pi_np = outputs["rot_log_pi"].squeeze(0).numpy()
+    mu_np = outputs["rot_mu"].squeeze(0).numpy()
+    sorted_modes = np.argsort(log_pi_np)[::-1]
+    primary_mode = sorted_modes[0]
+    secondary_mode = sorted_modes[1] if len(sorted_modes) > 1 else primary_mode
+    rot_primary_prob = float(np.exp(log_pi_np[primary_mode]))
+    rot_secondary_value = float(np.exp(mu_np[secondary_mode]))
+    rot_secondary_prob = float(np.exp(log_pi_np[secondary_mode]))
+    # Closed-form diameter from KNOWN H (user input) and predicted albedo:
     #   D[km] = 1329 / sqrt(p_v) · 10^(-H/5)
-    pred_diam_physical = 1329.0 / np.sqrt(pred_albedo) * 10 ** (-pred_h / 5)
+    # Since H is no longer predicted, this is an honest physics-based estimate.
+    pred_diam_physical = 1329.0 / np.sqrt(pred_albedo) * 10 ** (-H / 5)
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Predicted Class", pred_class, f"{probs.max()*100:.1f}% confidence")
-    c2.metric("Abs. Magnitude (H)", f"{pred_h:.2f}")
-    c3.metric("Geometric albedo", f"{pred_albedo:.3f}")
-    c4.metric("Diameter (physical)", f"{pred_diam_physical:.2f} km",
+    c2.metric("Geometric albedo", f"{pred_albedo:.3f}")
+    c3.metric("Diameter (physical)", f"{pred_diam_physical:.2f} km",
               delta=f"learned head: {pred_diam_learned:.2f} km", delta_color="off")
+    c4.metric("Rotation period",
+              f"{pred_rot_per:.2f} h ({rot_primary_prob*100:.0f}%)",
+              delta=f"alt: {rot_secondary_value:.1f} h ({rot_secondary_prob*100:.0f}%)",
+              delta_color="off")
+    c5.metric("Input H (known)", f"{H:.2f}")
 
     preset_pdes = PRESETS.get(st.session_state.preset)
     if preset_pdes is not None:
         true_row = preset_rows.loc[preset_pdes]
         def _fmt(v, suffix="", places=2):
             return f"{v:.{places}f}{suffix}" if pd.notna(v) else "—"
-        t1, t2, t3, t4 = st.columns(4)
+        t1, t2, t3, t4, t5 = st.columns(5)
         t1.metric(f"True class — {true_row['name']}", true_row["class"])
-        t2.metric("True H", _fmt(true_row["H"]))
-        t3.metric("True albedo", _fmt(true_row["albedo"], places=3))
-        t4.metric("True diameter", _fmt(true_row["diameter"], " km"))
+        t2.metric("True albedo", _fmt(true_row["albedo"], places=3))
+        t3.metric("True diameter", _fmt(true_row["diameter"], " km"))
+        t4.metric("True rot_per", _fmt(true_row.get("rot_per"), " h") if "rot_per" in true_row.index else "—")
+        t5.metric("True H", _fmt(true_row["H"]))
 
     prob_df = pd.DataFrame({
         "Class": label_encoder.classes_,
@@ -248,16 +297,19 @@ if st.sidebar.button("Predict", type="primary"):
             "semi_major_axis_au": a,
             "inclination_deg": i,
             "tisserand_jupiter": round(derived["tisserand_j"], 3),
-            "tisserand_mars":    round(derived["tisserand_mars"], 3),
-            "tisserand_neptune": round(derived["tisserand_neptune"], 3),
-            "res_mars_co_distance":  round(derived["res_mars_co"], 4),
-            "res_jup_3_2_distance":  round(derived["res_jup_3_2"], 4),
-            "res_nep_2_3_distance":  round(derived["res_nep_2_3"], 4),
             "feature_fill_strategy": fill_mode,
             "diameter_formula": "D[km] = 1329 / sqrt(albedo) · 10^(-H/5)",
         })
     with col_b:
-        st.subheader(f"k-NN neighbors (k={KNN_K})")
-        st.caption("Class distribution of training asteroids used to infer the 18 non-orbital features.")
-        neighbor_cls = [label_encoder.classes_[c] for c in ctx["train_class_labels"][neighbor_indices]]
-        st.bar_chart(pd.Series(neighbor_cls).value_counts())
+        if neighbor_indices is not None:
+            st.subheader(f"k-NN neighbors (k={KNN_K})")
+            st.caption("Class distribution of training asteroids used to infer the non-orbital features.")
+            neighbor_cls = [label_encoder.classes_[c] for c in ctx["train_class_labels"][neighbor_indices]]
+            st.bar_chart(pd.Series(neighbor_cls).value_counts())
+        else:
+            st.subheader("Real catalogue features")
+            st.caption(
+                "Prediction uses the asteroid's actual measured values for "
+                "n_obs_used, data_arc, condition_code, sigma_* and other "
+                "non-orbital features — no k-NN approximation."
+            )
