@@ -24,7 +24,7 @@ python -m src.data.fetch_jpl_full
 # Notebook-driven workflow (numbered, run in order on first setup)
 jupyter notebook notebooks/
 
-# Demo app (expects models/best_mtl_model.pt + data/processed/ + data/raw/dataset.csv to exist;
+# Demo app (expects models/mtl_model.pt + data/processed/ + data/raw/dataset.csv to exist;
 # the app uses relative paths, so run from inside app/)
 cd app && streamlit run streamlit_app.py
 
@@ -43,7 +43,7 @@ The `src/` modules export the reusable building blocks (`AsteroidMTLModel`, `Mul
 1. `01_eda.ipynb` — profiling only, no outputs.
 2. `02_preprocessing.ipynb` — produces `data/processed/{train,val,test}.parquet`, `scaler.joblib`, `label_encoder.joblib`, and the class-conditional albedo prior consumed by the model.
 3. `03_baselines.ipynb` — LightGBM single-task baselines (the reference point for "does MTL help").
-4. `04_mtl_training.ipynb` — produces `models/best_mtl_model.pt`. Computes inverse-frequency class weights here (not in the trainer).
+4. `04_mtl_training.ipynb` — produces `models/mtl_model.pt`. Computes inverse-frequency class weights here (not in the trainer).
 5. `05_evaluation.ipynb` — MTL vs baselines, t-SNE on `shared_repr`, confusion matrix.
 
 Preprocessing itself is fully runnable headless: `python -m src.data.preprocessing` calls `build_splits`, which writes the three parquet splits, `scaler.joblib`, `label_encoder.joblib`, and `class_albedo_prior.joblib`. The notebooks orchestrate the training/eval that consumes those artifacts.
@@ -87,15 +87,21 @@ Generic train/validate loop with early stopping on val loss and grad clipping. `
 
 ### Serving ([app/streamlit_app.py](app/streamlit_app.py))
 
-Loads `scaler`, `label_encoder`, the checkpoint, and the processed train split at startup. Two prediction paths:
+Loads the checkpoint + `scaler`/`label_encoder`/`class_albedo_prior` + the train split at startup. **Artifact paths come from the `artifacts:` block in [configs/default.yaml](configs/default.yaml)** (resolved against the project root, so the app no longer depends on being run from `app/` for those) — don't hardcode them. Three input modes (sidebar radio):
 
-- **Preset (real catalogued asteroid)**: a curated set of well-known objects (`PRESET_ASTEROID_PDES`, e.g. Ceres, Vesta, Eros, Apophis, Pluto). Their *actual* full scaled feature vector is recovered by running the real `preprocess` pipeline over the full catalogue at startup (~15 s, cached) — the model sees exactly the inputs it saw in training (`n_obs_used`, `data_arc`, `condition_code`, …), no approximation.
+- **Preset (real catalogued asteroid)**: a curated set of well-known objects (`PRESET_ASTEROID_PDES` in [src/data/build_presets.py](src/data/build_presets.py), e.g. Ceres, Vesta, Eros, Apophis, Pluto). Their *actual* full scaled feature vector is recovered by `compute_presets`. **Preset data has a CSV-or-artifact fallback**: when the ~465 MB `data/raw/dataset.csv` is present the app recomputes presets from it (freshest); otherwise it loads the small committed `data/processed/presets.joblib` (built once via `python -m src.data.build_presets`). A fresh clone has no CSV, so it uses the artifact. If you change preset feature engineering, rebuild that artifact.
 - **Custom (k-NN inferred)**: the user sets only `e, a, i, ma, H`; `tisserand_j` is derived; the remaining features are filled via **distance-weighted k-NN** (`predict_with_knn_fill`) over the scaled orbital subspace of the train set. For this off-distribution path the MDN rotation output is *not* trusted — rotation is reported as the **global train median + IQR** instead.
+- **All features (manual)**: the user types all 24 raw (pre-scaler) features directly; `neo`/`pha` render as checkboxes, `condition_code` as an int 0–9, the rest as floats. Each field has an **n/a checkbox** that substitutes the training median (`feat_median`). Rotation MDN *is* trusted here (in-distribution full vector).
 
 The app reports **diameter two ways**: a physics closed-form `D[km] = 1329 / sqrt(p_v) · 10^(-H/5)` from the input H and predicted albedo, alongside the learned diameter head's value. Inputs map to the feature vector via `scaler.feature_names_in_`; keep the named-features path working (om/w were pruned in preprocessing as orientation-only, low-signal features).
+
+### What's committed vs. gitignored
+
+The ~465 MB raw CSV and the val/test parquet splits stay gitignored (regenerated via preprocessing). **Committed so a fresh clone runs the demo out of the box**: `models/mtl_model.pt` (~2.4 MB), the three demo artifacts `data/processed/{scaler,label_encoder,class_albedo_prior}.joblib`, the presets fallback `data/processed/presets.joblib`, and `data/processed/train.parquet` (~42 MB, needed for the k-NN mode). The `.gitignore` uses explicit `!`-negations for these — don't blanket-ignore `models/*.pt` or `data/processed/*.parquet` without re-adding them.
 
 ### Other directories
 
 - `src/data/fetch_jpl_full.py` — pulls the full Small-Body Database to regenerate `data/raw/dataset.csv`.
+- `src/data/build_presets.py` — `compute_presets` (shared by the app) + a `__main__` that pickles the small `presets.joblib` fallback. Run `python -m src.data.build_presets` after changing preset asteroids or preset feature engineering.
 - `thesis_notes/` — markdown research notes feeding the written thesis (k-NN neighbor similarity study, diameter/albedo formula asymmetry, diameter outlier underestimation, parameter computation methods, glossary).
 - `figures/` — generated plots referenced by the notes/thesis (k-NN containment, head-vs-formula diameter comparison).

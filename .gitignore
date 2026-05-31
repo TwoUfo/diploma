@@ -1,11 +1,23 @@
-# Data
+# Data — raw catalogue is ~465 MB, never committed.
 data/raw/*.csv
-data/processed/*.parquet
 
-# Model artifacts
+# Processed parquet splits are fully reproducible from dataset.csv via
+# `python -m src.data.preprocessing` (deterministic: random_state=42). We commit
+# train.parquet (~42 MB) so the Streamlit demo runs straight after `git clone`
+# without fetching the ~465 MB raw catalogue; val/test are not needed for the
+# demo and stay ignored.
+data/processed/*.parquet
+!data/processed/train.parquet
+
+# Model checkpoints: ignore by default, but keep the trained demo model so a
+# fresh clone can run the Streamlit app + Docker image out of the box.
 models/*.pt
-models/*.joblib
+!models/mtl_model.pt
 models/*.pkl
+
+# Small demo artifacts (scaler/encoder/prior/presets) ARE committed — they are
+# required to run inference and are only a few hundred KB. They live under
+# data/processed/*.joblib, which is not otherwise ignored.
 
 # Python
 __pycache__/
@@ -40,3 +52,6 @@ Thumbs.db
 # Local thesis-writing notes (not part of the repository)
 figures/
 thesis_notes/
+
+# Claude Code project instructions (local only)
+CLAUDE.md

@@ -1,0 +1,48 @@
+# Keep the Docker build context small and the image lean. The Dockerfile only
+# needs: requirements.txt, src/, app/, configs/, models/, and the demo artifacts
+# under data/processed/ (scaler/encoder/prior/presets + train.parquet).
+
+# Virtualenv — never ship it (5+ GB; deps are reinstalled from requirements.txt)
+.venv/
+venv/
+env/
+
+# Git internals & history
+.git/
+.gitignore
+
+# Raw catalogue (~465 MB) — not used at runtime, presets come from presets.joblib
+data/raw/
+
+# Processed splits the demo does NOT read (only train.parquet is needed)
+data/processed/val.parquet
+data/processed/test.parquet
+
+# Notebooks & thesis-writing material — not part of the served app
+notebooks/
+thesis_notes/
+figures/
+*.ipynb
+
+# Python caches / build leftovers
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# IDE / editor / OS noise
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Project meta not needed inside the image
+CLAUDE.md
+README.md
+README_sample.md
+.env

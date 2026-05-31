@@ -1,5 +1,10 @@
 import sys
-sys.path.insert(0, "..")
+from pathlib import Path
+
+import yaml
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 import pandas as pd
@@ -11,6 +16,7 @@ from sklearn.neighbors import NearestNeighbors
 
 from src.models.mtl_model import AsteroidMTLModel
 from src.data.preprocessing import JUPITER_A
+from src.data.build_presets import compute_presets
 
 
 USER_INPUT_FEATS = ["e", "a", "i", "ma", "H"]
@@ -19,33 +25,25 @@ ORBITAL_FEATS = USER_INPUT_FEATS + DERIVED_FEATS
 KNN_K = 100
 CUSTOM_LABEL = "Custom (k-NN inferred)"
 
-RARE_REMAP = {"HYA": "Rare", "IEO": "Rare", "AST": "Rare", "CEN": "Rare"}
 
-PRESET_ASTEROID_PDES = [
-    "1",        # Ceres
-    "4",        # Vesta
-    "65",       # Cybele
-    "433",      # Eros
-    "434",      # Hungaria
-    "588",      # Achilles
-    "1862",     # Apollo
-    "2060",     # Chiron
-    "2062",     # Aten
-    "5261",     # Eureka
-    "99942",    # Apophis
-    "134340",   # Pluto
-]
+def _load_artifact_paths() -> dict:
+    with open(PROJECT_ROOT / "configs" / "default.yaml") as f:
+        cfg = yaml.safe_load(f)
+    # Resolve every artifact path against the project root.
+    return {k: PROJECT_ROOT / v for k, v in cfg["artifacts"].items()}
 
 
 @st.cache_resource
 def load_model():
-    label_encoder = joblib.load("../data/processed/label_encoder.joblib")
-    scaler = joblib.load("../data/processed/scaler.joblib")
+    art = _load_artifact_paths()
+
+    label_encoder = joblib.load(art["label_encoder_path"])
+    scaler = joblib.load(art["scaler_path"])
     n_classes = len(label_encoder.classes_)
     n_features = scaler.n_features_in_
     feat_names = list(scaler.feature_names_in_)
 
-    class_albedo_prior = joblib.load("../data/processed/class_albedo_prior.joblib")
+    class_albedo_prior = joblib.load(art["class_albedo_prior_path"])
     model = AsteroidMTLModel(
         n_features=n_features,
         n_classes=n_classes,
@@ -56,11 +54,11 @@ def load_model():
         class_albedo_prior=class_albedo_prior,
         rot_mdn_components=5,
     )
-    checkpoint = torch.load("../models/best_mtl_model.pt", map_location="cpu", weights_only=False)
+    checkpoint = torch.load(art["model_path"], map_location="cpu", weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    train = pd.read_parquet("../data/processed/train.parquet")
+    train = pd.read_parquet(art["train_parquet_path"])
     X_scaled = train[feat_names].values.astype(np.float32)
     train_class_labels = train["class_label"].values
 
@@ -75,43 +73,22 @@ def load_model():
     global_rot_log_q25 = float(np.percentile(global_rot_log_values, 25))
     global_rot_log_q75 = float(np.percentile(global_rot_log_values, 75))
 
-    display_cols = ["pdes", "name", "class", "e", "a", "i", "om", "w", "ma",
-                    "H", "diameter", "albedo", "rot_per"]
-    raw = pd.read_csv("../data/raw/dataset.csv", low_memory=False, usecols=display_cols)
-    raw["pdes"] = raw["pdes"].astype(str).str.strip()
-    raw["taxonomy"] = raw["class"].replace(RARE_REMAP)
-    preset_rows = raw[raw["pdes"].isin(PRESET_ASTEROID_PDES)].set_index("pdes")
-    preset_rows = preset_rows.loc[[p for p in PRESET_ASTEROID_PDES if p in preset_rows.index]]
-
-
-    from src.data.preprocessing import preprocess, drop_corrupt_rows
-    full_raw = pd.read_csv("../data/raw/dataset.csv", low_memory=False)
-    full_raw["pdes_str"] = full_raw["pdes"].astype(str).str.strip()
-    full_clean = drop_corrupt_rows(full_raw)
-    full_features, _, _, _, _ = preprocess(full_raw.copy())
-    preset_pdes_set = set(PRESET_ASTEROID_PDES)
-    preset_clean_idx = full_clean.index[full_clean["pdes_str"].isin(preset_pdes_set)].tolist()
-    preset_features_aligned = full_features.loc[preset_clean_idx, feat_names]
-    preset_scaled_matrix = scaler.transform(preset_features_aligned.values).astype(np.float32)
-    preset_scaled = {
-        full_clean.loc[idx, "pdes_str"]: row
-        for idx, row in zip(preset_clean_idx, preset_scaled_matrix)
-    }
-
-    # Raw (pre-scaler) feature values for presets — exactly what scaler.transform
-    # receives. Used to show the catalogued 24-feature vector and to seed the
-    # manual "All features" tab.
-    preset_raw_matrix = preset_features_aligned.values.astype(np.float64)
-    preset_raw = {
-        full_clean.loc[idx, "pdes_str"]: row
-        for idx, row in zip(preset_clean_idx, preset_raw_matrix)
-    }
-
-    # Per-feature training statistics in the pre-scaler space (defaults / hints
-    # for manual entry).
-    feat_median = full_features[feat_names].median().values.astype(np.float64)
-    feat_min = full_features[feat_names].min().values.astype(np.float64)
-    feat_max = full_features[feat_names].max().values.astype(np.float64)
+    # Preset data: recompute from the raw catalogue when it's present (freshest),
+    # otherwise fall back to the small prebuilt artifact (e.g. fresh clone with
+    # no ~465 MB CSV). See src/data/build_presets.py.
+    if art["raw_dataset_path"].exists():
+        presets = compute_presets(str(art["raw_dataset_path"]), scaler, feat_names)
+        presets_source = "raw catalogue"
+    elif art["presets_path"].exists():
+        presets = joblib.load(art["presets_path"])
+        presets_source = "prebuilt artifact"
+    else:
+        raise FileNotFoundError(
+            f"Neither the raw catalogue ({art['raw_dataset_path']}) nor the "
+            f"prebuilt presets ({art['presets_path']}) were found. Run "
+            f"`python -m src.data.build_presets` (needs the raw CSV once) or "
+            f"`python -m src.data.fetch_jpl_full` to fetch the catalogue."
+        )
 
     return {
         "model": model,
@@ -119,16 +96,17 @@ def load_model():
         "label_encoder": label_encoder,
         "feat_names": feat_names,
         "X_scaled": X_scaled,
-        "preset_scaled": preset_scaled,
-        "preset_raw": preset_raw,
-        "feat_median": feat_median,
-        "feat_min": feat_min,
-        "feat_max": feat_max,
+        "preset_scaled": presets["preset_scaled"],
+        "preset_raw": presets["preset_raw"],
+        "feat_median": presets["feat_median"],
+        "feat_min": presets["feat_min"],
+        "feat_max": presets["feat_max"],
         "train_class_labels": train_class_labels,
         "nn_index": nn_index,
         "orbital_idx": orbital_idx,
         "other_idx": other_idx,
-        "preset_rows": preset_rows,
+        "preset_rows": presets["preset_rows"],
+        "presets_source": presets_source,
         "global_rot_log_median": global_rot_log_median,
         "global_rot_log_q25": global_rot_log_q25,
         "global_rot_log_q75": global_rot_log_q75,

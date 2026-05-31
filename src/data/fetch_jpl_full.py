@@ -1,28 +1,3 @@
-"""Fetch the full JPL Small-Body Database asteroid catalogue.
-
-Produces a single CSV at ``data/raw/dataset.csv`` with all 44 fields previously
-shipped with the project plus 11 new ones we identified as informative:
-
-    n_obs_used, data_arc, condition_code  — observation-quality proxies
-    H_sigma                                — uncertainty on H
-    rot_per                                — rotation period
-    spec_B, spec_T                         — spectral taxonomy
-    G                                      — phase-curve slope
-    BV, UB, IR                             — colour indices
-
-Strategy: query class-by-class so each response stays under JPL's effective
-limit. MBA (the ~1.4M class) is the dominant cost; queries for the other
-12 classes finish in seconds. Saves incrementally after every class so a
-crash mid-MBA does not lose the earlier work.
-
-Run from project root:
-
-    .venv/bin/python -m src.data.fetch_jpl_full
-
-Output: data/raw/dataset.csv (existing file is moved to dataset.csv.bak first).
-Estimated total time: 5-40 min depending on JPL load (MBA dominates).
-"""
-
 from __future__ import annotations
 
 import csv
@@ -63,7 +38,6 @@ NEW_FIELDS = [
 
 FIELDS = EXISTING_FIELDS + NEW_FIELDS
 
-# Order: smallest first so the user sees early progress before MBA dominates.
 CLASSES = [
     "HYA", "IEO", "AST",
     "ATE", "TJN", "AMO", "TNO", "CEN",

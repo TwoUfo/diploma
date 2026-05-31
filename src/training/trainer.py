@@ -158,7 +158,7 @@ class Trainer:
             if val_metrics["loss"] < best_val_loss:
                 best_val_loss = val_metrics["loss"]
                 epochs_no_improve = 0
-                self.save_checkpoint("best_mtl_model.pt")
+                self.save_checkpoint("mtl_model.pt")
             else:
                 epochs_no_improve += 1
                 if epochs_no_improve >= patience:

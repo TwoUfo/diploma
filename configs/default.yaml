@@ -32,6 +32,16 @@ data:
     - AST
     - CEN
 
+
+artifacts:
+  model_path: "models/mtl_model.pt"
+  scaler_path: "data/processed/scaler.joblib"
+  label_encoder_path: "data/processed/label_encoder.joblib"
+  class_albedo_prior_path: "data/processed/class_albedo_prior.joblib"
+  train_parquet_path: "data/processed/train.parquet"
+  raw_dataset_path: "data/raw/dataset.csv"
+  presets_path: "data/processed/presets.joblib"
+
 model:
   backbone_layers: [512, 256, 128, 64]
   head_hidden: 32

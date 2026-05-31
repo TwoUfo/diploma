@@ -97,17 +97,6 @@ def mdn_nll(
 
 
 class AsteroidMTLModel(nn.Module):
-    """
-    4-task MTL: class, diameter, albedo, rotation period.
-
-    Albedo head: predicts the *residual* against a class-conditional prior.
-    The prior is registered as a buffer (computed from train data in
-    preprocessing) and added to the residual at output time.
-    Rotation head: Mixture Density Network with ``K`` Gaussian components
-    so the head can model the bimodal YORP-spun vs primordial distribution
-    instead of regressing to the population mean.
-    """
-
     def __init__(
         self,
         n_features: int,
