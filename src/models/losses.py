@@ -5,18 +5,6 @@ from src.models.mtl_model import mdn_nll
 
 
 class MultiTaskLoss(nn.Module):
-    """Four-task loss with Kendall uncertainty weighting.
-
-    * Class — cross-entropy with optional inverse-frequency weights.
-    * Diameter, albedo — masked MSE in log-space. The albedo head already
-      adds the class-conditional prior bias, so we still compare to the
-      full log(albedo) target.
-    * Rotation period — masked Mixture Density Network NLL. Kendall scaling
-      still wraps it so the task's overall contribution is auto-balanced
-      with the other three; the σ_k *inside* the MDN model the per-mode
-      noise.
-    """
-
     def __init__(self, n_classes: int, class_weights: torch.Tensor = None):
         super().__init__()
         self.log_sigma_class = nn.Parameter(torch.tensor(0.0))

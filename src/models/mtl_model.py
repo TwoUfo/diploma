@@ -51,13 +51,6 @@ class TaskHead(nn.Module):
 
 
 class MDNHead(nn.Module):
-    """Mixture Density Network head for multimodal regression.
-
-    Outputs ``K`` Gaussian components: mixture weights (π), means (μ),
-    log-stds (log σ). Use ``mdn_nll`` for the loss and ``mdn_map`` to
-    pick the most-likely-component mean for a point estimate.
-    """
-
     def __init__(self, input_size: int, hidden_size: int, K: int = 5, dropout: float = 0.1):
         super().__init__()
         self.K = K
@@ -74,15 +67,11 @@ class MDNHead(nn.Module):
         h = self.shared(x)
         log_pi = F.log_softmax(self.pi_layer(h), dim=-1)
         mu = self.mu_layer(h)
-        # Clamp keeps σ inside [exp(-5), exp(3)] ≈ [0.007, 20] hours in log-space
-        # — wide enough for the catalogue (rot_per spans 0.001 .. 4800 h) but
-        # prevents the head from degenerating to a delta function.
         log_sigma = self.log_sigma_layer(h).clamp(-5.0, 3.0)
         return log_pi, mu, log_sigma
 
 
 def mdn_map(log_pi: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
-    """Most-likely-component point estimate: argmax_k π_k → μ_k."""
     most_likely = log_pi.argmax(dim=-1, keepdim=True)
     return mu.gather(-1, most_likely).squeeze(-1)
 
@@ -94,7 +83,6 @@ def mdn_nll(
     target: torch.Tensor,
     mask: torch.Tensor,
 ) -> torch.Tensor:
-    """Masked negative log-likelihood of a Gaussian mixture."""
     target = target.unsqueeze(-1)
     log_prob_k = (
         -0.5 * ((target - mu) / log_sigma.exp()) ** 2
@@ -109,14 +97,15 @@ def mdn_nll(
 
 
 class AsteroidMTLModel(nn.Module):
-    """4-task MTL: class, diameter, albedo, rotation period.
+    """
+    4-task MTL: class, diameter, albedo, rotation period.
 
-    * Albedo head: predicts the *residual* against a class-conditional prior.
-      The prior is registered as a buffer (computed from train data in
-      preprocessing) and added to the residual at output time.
-    * Rotation head: Mixture Density Network with ``K`` Gaussian components
-      so the head can model the bimodal YORP-spun vs primordial distribution
-      instead of regressing to the population mean.
+    Albedo head: predicts the *residual* against a class-conditional prior.
+    The prior is registered as a buffer (computed from train data in
+    preprocessing) and added to the residual at output time.
+    Rotation head: Mixture Density Network with ``K`` Gaussian components
+    so the head can model the bimodal YORP-spun vs primordial distribution
+    instead of regressing to the population mean.
     """
 
     def __init__(
@@ -149,10 +138,6 @@ class AsteroidMTLModel(nn.Module):
         shared = self.backbone(x)
         class_logits = self.class_head(shared)
 
-        # Albedo: residual prediction + class-conditional bias.
-        # During training we use the ground-truth class label so the residual
-        # head sees the correct baseline; at inference we mix over predicted
-        # class probabilities, decoupled from the class head's gradient.
         albedo_residual = self.albedo_residual_head(shared).squeeze(-1)
         if class_label is not None:
             albedo_bias = self.class_albedo_prior[class_label]
@@ -161,8 +146,6 @@ class AsteroidMTLModel(nn.Module):
             albedo_bias = (class_probs * self.class_albedo_prior).sum(dim=-1)
         albedo_pred = albedo_residual + albedo_bias
 
-        # Rotation: MDN — return distribution parameters plus a point estimate
-        # (MAP of the most-likely mixture component) for downstream metrics.
         rot_log_pi, rot_mu, rot_log_sigma = self.rot_head(shared)
         rot_pred = mdn_map(rot_log_pi, rot_mu)
 
