@@ -52,6 +52,8 @@ Thumbs.db
 # Local thesis-writing notes (not part of the repository)
 figures/
 thesis_notes/
+scripts/
+doc_examples/
 
 # Claude Code project instructions (local only)
 CLAUDE.md
